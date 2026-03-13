@@ -1,0 +1,30 @@
+# Tokens y configuración OAuth (NUNCA subir al repo)
+token_cache.json
+config.json
+.outlook-email-analyzer/
+
+# Archivos exportados (pueden contener datos personales)
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+.env.local
+*.egg-info/
+dist/
+build/
+
+# Temporales
+*.log
+*.bak
+*.tmp
+*~
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
