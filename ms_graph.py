@@ -53,6 +53,7 @@ class MailData(NamedTuple):
     sender_email: str
     sender_name: str
     is_unread: bool
+    unsubscribe_link: str = ""  # URL de List-Unsubscribe (vacio si no es newsletter)
 
 
 class _SecureToken:
@@ -351,6 +352,34 @@ def _validate_folder(folder: str) -> str:
     return folder
 
 
+# ─── Parseo de headers de newsletter ─────────────────────────────────────────
+
+# Regex para extraer URLs de headers List-Unsubscribe
+# Formato tipico: <https://example.com/unsub>, <mailto:unsub@example.com>
+_UNSUB_URL_RE = re.compile(r"<(https?://[^>]+)>")
+_UNSUB_MAILTO_RE = re.compile(r"<(mailto:[^>]+)>")
+
+
+def _parse_unsubscribe(headers: list[dict]) -> str:
+    """
+    Extrae el link de desuscripcion del header List-Unsubscribe.
+    Prioriza URLs https sobre mailto.
+    Retorna string vacio si no existe.
+    """
+    for h in headers:
+        if h.get("name", "").lower() == "list-unsubscribe":
+            value = h.get("value", "")
+            # Priorizar URL https
+            match = _UNSUB_URL_RE.search(value)
+            if match:
+                return match.group(1)
+            # Fallback a mailto
+            match = _UNSUB_MAILTO_RE.search(value)
+            if match:
+                return match.group(1)
+    return ""
+
+
 # ─── Microsoft Graph API ─────────────────────────────────────────────────────
 
 def get_folder_info(token, folder: str = "inbox") -> dict:
@@ -379,21 +408,31 @@ def read_emails(
     token,
     folder: str = "inbox",
     unread_only: bool = False,
+    detect_newsletters: bool = False,
     progress_callback=None,
 ) -> Generator[MailData, None, None]:
     """
     Lee correos via Graph API. Yielda MailData.
-    Muy eficiente: solo pide los campos 'from' e 'isRead' (no descarga cuerpo).
-    Pagina automáticamente (999 correos por request).
+    Muy eficiente: solo pide los campos necesarios (no descarga cuerpo).
+    Pagina automaticamente (999 correos por request).
     Incluye retry para 429 (throttling) y timeout en todas las peticiones.
+
+    Args:
+        detect_newsletters: Si True, pide internetMessageHeaders para
+                           detectar el header List-Unsubscribe (RFC 2369).
+                           Mas lento porque cada mensaje trae mas datos.
     """
     folder = _validate_folder(folder)
-    headers = _auth_headers(token)
+    auth = _auth_headers(token)
+
+    fields = "from,isRead"
+    if detect_newsletters:
+        fields += ",internetMessageHeaders"
 
     url = f"{GRAPH_BASE}/me/mailFolders/{folder}/messages"
     params: dict = {
-        "$select": "from,isRead",
-        "$top":    999,
+        "$select":  fields,
+        "$top":     999,
         "$orderby": "receivedDateTime desc",
     }
     if unread_only:
@@ -402,10 +441,10 @@ def read_emails(
     fetched = 0
 
     while url:
-        resp = _api_get(url, headers, params)
+        resp = _api_get(url, auth, params)
 
         if resp.status_code != 200:
-            raise SystemExit(f"\n❌  Error API: {_parse_api_error(resp)}\n")
+            raise SystemExit(f"\n  Error API: {_parse_api_error(resp)}\n")
 
         data = resp.json()
         messages = data.get("value", [])
@@ -420,6 +459,12 @@ def read_emails(
                 fetched += 1
                 continue
 
+            # Extraer link de desuscripcion si se pidio
+            unsub_link = ""
+            if detect_newsletters:
+                msg_headers = msg.get("internetMessageHeaders", [])
+                unsub_link = _parse_unsubscribe(msg_headers)
+
             fetched += 1
             if progress_callback:
                 progress_callback(fetched)
@@ -428,11 +473,12 @@ def read_emails(
                 sender_email=email_addr,
                 sender_name=name,
                 is_unread=is_unread,
+                unsubscribe_link=unsub_link,
             )
 
-        # Paginación: Graph API retorna @odata.nextLink con la URL de la siguiente página
+        # Paginacion: Graph API retorna @odata.nextLink con la URL de la siguiente pagina
         url = data.get("@odata.nextLink")
-        params = {}  # nextLink ya incluye los parámetros
+        params = {}  # nextLink ya incluye los parametros
 
     # Asegurar callback final
     if progress_callback:
@@ -456,6 +502,109 @@ def list_folders(token) -> list[tuple[str, int, int]]:
         total  = f.get("totalItemCount", 0)
         unread = f.get("unreadItemCount", 0)
         result.append((name, total, unread))
+    return result
+
+
+# ─── Extraccion de links reales de desuscripcion (desde body HTML) ────────────
+
+# Patrones para detectar links de desuscripcion en el HTML del correo
+_UNSUB_HREF_RE = re.compile(
+    r'<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]*)</a>',
+    re.IGNORECASE,
+)
+
+# Palabras clave en el href o texto del link que indican desuscripcion
+_UNSUB_KEYWORDS = (
+    "unsubscribe", "unsub", "optout", "opt-out", "opt_out",
+    "desuscri", "darse de baja", "cancelar suscri",
+    "email-preferences", "email_preferences",
+    "manage-preferences", "manage_preferences",
+    "subscription", "remove",
+)
+
+
+def _extract_unsub_from_html(html: str) -> str:
+    """
+    Busca links de desuscripcion en el HTML del cuerpo del correo.
+    Busca <a href="..."> donde el href o el texto contenga palabras clave.
+    Retorna el primer link encontrado o string vacio.
+    """
+    if not html:
+        return ""
+
+    for match in _UNSUB_HREF_RE.finditer(html):
+        href = match.group(1)
+        text = match.group(2).lower()
+        href_lower = href.lower()
+
+        # Verificar si el href o el texto del link tiene palabras clave
+        for keyword in _UNSUB_KEYWORDS:
+            if keyword in href_lower or keyword in text:
+                # Solo URLs http/https (ignorar mailto, javascript, #)
+                if href.startswith("http"):
+                    return href
+    return ""
+
+
+def fetch_unsubscribe_links(
+    token,
+    sender_emails: list[str],
+    folder: str = "inbox",
+    progress_callback=None,
+) -> dict[str, str]:
+    """
+    Segundo pase: busca el link REAL de desuscripcion en el cuerpo HTML
+    de UN correo reciente por cada remitente.
+
+    Mucho mas confiable que List-Unsubscribe header porque los links del
+    cuerpo estan disenados para abrirse en el navegador.
+
+    Args:
+        sender_emails: Lista de direcciones de email a buscar.
+        folder: Carpeta donde buscar.
+        progress_callback: Callable(current, total).
+
+    Returns:
+        Dict {email: url_desuscripcion} (solo remitentes donde se encontro link).
+    """
+    folder = _validate_folder(folder)
+    auth = _auth_headers(token)
+    total = len(sender_emails)
+    result: dict[str, str] = {}
+
+    for i, email in enumerate(sender_emails, 1):
+        if progress_callback:
+            progress_callback(i, total)
+
+        # Buscar 1 correo reciente de este remitente (solo body)
+        url = f"{GRAPH_BASE}/me/mailFolders/{folder}/messages"
+        params = {
+            "$select": "body",
+            "$top": 1,
+            "$filter": f"from/emailAddress/address eq '{email}'",
+            "$orderby": "receivedDateTime desc",
+        }
+
+        try:
+            resp = _api_get(url, auth, params)
+            if resp.status_code != 200:
+                continue
+
+            messages = resp.json().get("value", [])
+            if not messages:
+                continue
+
+            body = messages[0].get("body", {})
+            html_content = body.get("content", "")
+
+            link = _extract_unsub_from_html(html_content)
+            if link:
+                result[email] = link
+
+        except Exception:
+            # Si falla un remitente, continuar con el siguiente
+            continue
+
     return result
 
 

@@ -49,6 +49,9 @@ un ranking tabular que permite identificar de un vistazo quien envia mas correo.
    de cada correo (no descarga el cuerpo ni adjuntos).
 3. Agrupa por direccion de remitente, cuenta y ordena de mayor a menor.
 4. Muestra el ranking en la terminal con barra de distribucion visual.
+5. **Modo newsletters (`--newsletters`):** Arquitectura de dos pases:
+   - **Pase 1:** Lee los headers `List-Unsubscribe` (RFC 2369) de cada correo para detectar remitentes newsletter.
+   - **Pase 2:** Para cada remitente unico, descarga el body HTML de 1 solo correo y extrae el link real de desuscripcion (busca URLs con palabras clave como "unsubscribe", "optout", "desuscri", etc.). Esto genera links que funcionan directamente en el navegador.
 
 ---
 
@@ -71,7 +74,10 @@ Microsoft Graph REST API  (https://graph.microsoft.com/v1.0)
 | - Token cache   |     | - Ranking desc |     | - Barra ASCII |
 |   (DPAPI)       |     | - Nombre mas   |     | - Resumen     |
 | - Graph API     |     |   frecuente    |     |   estadistico |
-| - Retry/timeout |     +----------------+     +---------------+
+| - Retry/timeout |     | - Newsletter   |     | - Tabla news- |
+| - Newsletters:  |     |   detection    |     |   letters con |
+|   2do pase HTML |     +----------------+     |   link unsub  |
+|   body parsing  |                            +---------------+
 +------------------+
         |
         v
@@ -152,6 +158,15 @@ python main.py --list-folders
 # Analizar otra carpeta
 python main.py --folder sentitems
 
+# Detectar newsletters y mostrar links de desuscripcion
+python main.py --newsletters
+
+# Newsletters: solo top 10
+python main.py --newsletters --top 10
+
+# Newsletters: exportar a CSV con columna de link
+python main.py --newsletters --export newsletters.csv
+
 # Exportar a CSV
 python main.py --export ranking.csv
 
@@ -173,6 +188,7 @@ python main.py --help
 |--------|-------------|-------------------|
 | `--user EMAIL` | Direccion de correo (si no se da, se pide interactivamente) | Interactivo |
 | `--unread-only` | Analizar solo correos no leidos | Todos |
+| `--newsletters` | Detectar newsletters y mostrar link de desuscripcion por remitente | Desactivado |
 | `--top N` | Mostrar solo los top N remitentes | Sin limite |
 | `--folder NOMBRE` | Carpeta a analizar (ver `--list-folders`) | `inbox` |
 | `--list-folders` | Listar carpetas disponibles con conteo y salir | -- |
@@ -213,6 +229,44 @@ RESUMEN:
   Top remitente:                 Computrabajo (487 correos, 13.2%)
 ```
 
+### Con `--newsletters`
+
+```
+===========================================================================
+  OUTLOOK EMAIL ANALYZER -- Ranking de remitentes
+===========================================================================
+
+  Carpeta: Bandeja de entrada | 3,700 correos (3,200 no leidos)
+  Modo: todos + deteccion de newsletters -- analizando ~3,700 correos...
+
+  Procesando correo 3,700/3,700... 100%
+
+  Buscando links de desuscripcion en 43 remitentes...
+
+  Escaneando remitentes... 28 links encontrados
+
+───────────────────────────────────────────────────────────────────────────────
+    #  Remitente                       Email                          Cant.  Unsub  Link de desuscripcion
+───────────────────────────────────────────────────────────────────────────────
+    1  Computrabajo                    alertas@computrabajo.com         487  SI     https://computrabajo.com/unsub?t=...
+    2  LinkedIn Jobs                   jobs@linkedin.com                312  SI     https://linkedin.com/comm/unsubscribe
+    3  Magneto Empleos                 noreply@magneto365.com           289  SI     https://magneto365.com/unsubscribe
+    4  Microsoft                       no-reply@microsoft.com            98  --
+    5  GitHub                          notifications@github.com          76  --
+  ...
+───────────────────────────────────────────────────────────────────────────────
+
+RESUMEN:
+  Correos analizados (totales):       3,700
+  Remitentes unicos:                     43
+  Top remitente:                 Computrabajo (487 correos, 13.2%)
+
+  NEWSLETTERS:
+    Remitentes con desuscripcion:     28 (65.1%)
+    Correos de newsletters:        2,891 (78.1% del total)
+    Remitentes sin desuscripcion:     15
+```
+
 ---
 
 ## Seguridad
@@ -239,10 +293,10 @@ del usuario y nunca se transmiten fuera de las peticiones a Microsoft Graph.
 
 ```
 outlook-email-analyzer-python/
-  main.py              Punto de entrada, CLI (argparse), orquestacion, exportacion CSV
-  ms_graph.py          OAuth2 (MSAL + Device Code) + Microsoft Graph API + token cache
-  analyzer.py          Logica de agrupacion (Counter) y ranking por remitente
-  display.py           Formateo tabular en consola con barras ASCII de distribucion
+  main.py              Punto de entrada, CLI (argparse), orquestacion newsletters, exportacion CSV
+  ms_graph.py          OAuth2 (MSAL + Device Code) + Graph API + token cache + newsletters (body HTML)
+  analyzer.py          Logica de agrupacion (Counter), ranking por remitente, deteccion newsletters
+  display.py           Formateo tabular: tabla normal, tabla newsletters con links, barras ASCII
   requirements.txt     Dependencias: msal, msal-extensions, requests
   .gitignore           Exclusiones para repositorio publico seguro
   README.md            Esta documentacion
@@ -250,10 +304,10 @@ outlook-email-analyzer-python/
 
 | Archivo | Lineas | Responsabilidad |
 |---------|--------|----------------|
-| `ms_graph.py` | ~460 | Todo lo relacionado con Microsoft: autenticacion, cache, API REST, validacion |
-| `main.py` | ~150 | CLI, flujo principal, exportacion CSV con sanitizacion |
-| `analyzer.py` | ~70 | Logica pura de conteo y ranking (sin I/O ni dependencias externas) |
-| `display.py` | ~115 | Renderizado en consola (tabla, barras, resumen, progreso) |
+| `ms_graph.py` | ~520 | Autenticacion, cache, API REST, validacion, deteccion de newsletters (2do pase HTML) |
+| `main.py` | ~220 | CLI, flujo principal, orquestacion newsletters, exportacion CSV con sanitizacion |
+| `analyzer.py` | ~80 | Logica pura de conteo, ranking y deteccion de newsletters por remitente |
+| `display.py` | ~190 | Renderizado en consola: tabla normal, tabla newsletters, barras, resumen, progreso |
 
 ---
 
