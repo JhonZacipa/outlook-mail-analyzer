@@ -23,6 +23,9 @@ build/
 *.tmp
 *~
 
+# Contexto para IA (no es parte del proyecto)
+AI_CONTEXT.md
+
 # IDE
 .vscode/
 .idea/
