@@ -193,11 +193,25 @@ def _build_token_cache() -> msal.SerializableTokenCache:
     Construye el cache de tokens.
     Windows: cifrado con DPAPI via msal_extensions (si está disponible).
     Otros:   archivo JSON con permisos 0600.
+
+    Si el cache está corrupto o fue escrito con un método de cifrado diferente,
+    se elimina automáticamente y se crea uno nuevo (el usuario re-autentica).
     """
     if _USE_DPAPI:
         _ensure_dir()
-        persistence = FilePersistenceWithDataProtection(str(CACHE_FILE))
-        return PersistedTokenCache(persistence)
+        try:
+            persistence = FilePersistenceWithDataProtection(str(CACHE_FILE))
+            cache = PersistedTokenCache(persistence)
+            # Forzar lectura para detectar corrupción temprano
+            cache.search(cache.CredentialType.ACCOUNT, query={})
+            return cache
+        except Exception:
+            # Cache corrupto o incompatible — eliminar y crear nuevo
+            if CACHE_FILE.exists():
+                CACHE_FILE.unlink()
+                print("  (Cache de sesion corrupto, se regenerara automaticamente)")
+            persistence = FilePersistenceWithDataProtection(str(CACHE_FILE))
+            return PersistedTokenCache(persistence)
 
     # Fallback sin msal_extensions
     cache = msal.SerializableTokenCache()
@@ -205,7 +219,7 @@ def _build_token_cache() -> msal.SerializableTokenCache:
         try:
             cache.deserialize(CACHE_FILE.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            CACHE_FILE.unlink()
     return cache
 
 
